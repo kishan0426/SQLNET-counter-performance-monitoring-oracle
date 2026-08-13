@@ -5,25 +5,32 @@ DECLARE
     -- PARAMETERS
     ----------------------------------------------------------------
     l_samples          PLS_INTEGER := 5;
-    l_interval_seconds NUMBER      := 60;
+    l_interval_seconds NUMBER      := 15;
 
     l_start            TIMESTAMP;
     l_now              TIMESTAMP;
     l_elapsed          NUMBER;
 
-    l_to_client        NUMBER;
-    l_from_client      NUMBER;
-    l_more_to_client   NUMBER;
-    l_more_from_client NUMBER;
+    l_sent             NUMBER;
+    l_received         NUMBER;
+
+    l_sent_prev        NUMBER := 0;
+    l_received_prev    NUMBER := 0;
+
+    l_sent_delta       NUMBER;
+    l_received_delta   NUMBER;
+
+    l_first_sample     BOOLEAN := TRUE;
 
 BEGIN
 
     l_start := SYSTIMESTAMP;
 
     DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE(
-        'Monitoring INACTIVE sessions'
-    );
+    DBMS_OUTPUT.PUT_LINE('==============================================');
+    DBMS_OUTPUT.PUT_LINE(' INACTIVE SESSION SQL*NET TRAFFIC MONITOR');
+    DBMS_OUTPUT.PUT_LINE('==============================================');
+    DBMS_OUTPUT.PUT_LINE('');
 
     DBMS_OUTPUT.PUT_LINE(
         'Samples    : ' || l_samples
@@ -34,7 +41,7 @@ BEGIN
     );
 
     DBMS_OUTPUT.PUT_LINE(
-        'Total time : ' ||
+        'Total time : approximately ' ||
         (l_samples * l_interval_seconds) || ' seconds'
     );
 
@@ -43,19 +50,19 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE(
         RPAD('SAMPLE',8) ||
         RPAD('ELAPSED',12) ||
-        RPAD('TO_CLIENT',15) ||
-        RPAD('FROM_CLIENT',17) ||
-        RPAD('MORE_TO',12) ||
-        'MORE_FROM'
+        RPAD('SENT_MB',15) ||
+        RPAD('RECV_MB',15) ||
+        RPAD('TOTAL_MB',15) ||
+        'TOTAL_MBPS'
     );
 
     DBMS_OUTPUT.PUT_LINE(
-        '----------------------------------------------------------------'
+        '---------------------------------------------------------------------'
     );
 
 
     ----------------------------------------------------------------
-    -- TAKE MULTIPLE SNAPSHOTS
+    -- MULTIPLE SNAPSHOTS
     ----------------------------------------------------------------
 
     FOR i IN 1 .. l_samples
@@ -73,43 +80,29 @@ BEGIN
 
 
         ----------------------------------------------------------------
-        -- SNAPSHOT OF ALL CURRENTLY INACTIVE USER SESSIONS
+        -- CURRENT TOTAL BYTES FOR INACTIVE USER SESSIONS
         ----------------------------------------------------------------
 
         SELECT
             NVL(SUM(
                 CASE
-                    WHEN sn.name = 'SQL*Net message to client'
+                    WHEN sn.name =
+                        'bytes sent via SQL*Net to client'
                     THEN st.value
                 END
             ),0),
 
             NVL(SUM(
                 CASE
-                    WHEN sn.name = 'SQL*Net message from client'
-                    THEN st.value
-                END
-            ),0),
-
-            NVL(SUM(
-                CASE
-                    WHEN sn.name = 'SQL*Net more data to client'
-                    THEN st.value
-                END
-            ),0),
-
-            NVL(SUM(
-                CASE
-                    WHEN sn.name = 'SQL*Net more data from client'
+                    WHEN sn.name =
+                        'bytes received via SQL*Net from client'
                     THEN st.value
                 END
             ),0)
 
         INTO
-            l_to_client,
-            l_from_client,
-            l_more_to_client,
-            l_more_from_client
+            l_sent,
+            l_received
 
         FROM v$session s
         JOIN v$sesstat st
@@ -120,24 +113,73 @@ BEGIN
         WHERE s.type = 'USER'
           AND s.status = 'INACTIVE'
           AND sn.name IN (
-              'SQL*Net message to client',
-              'SQL*Net message from client',
-              'SQL*Net more data to client',
-              'SQL*Net more data from client'
+              'bytes sent via SQL*Net to client',
+              'bytes received via SQL*Net from client'
           );
 
 
         ----------------------------------------------------------------
-        -- PRINT SAMPLE
+        -- FIRST SAMPLE
+        ----------------------------------------------------------------
+
+        IF l_first_sample THEN
+
+            l_sent_delta     := 0;
+            l_received_delta := 0;
+
+            l_first_sample := FALSE;
+
+        ELSE
+
+            l_sent_delta :=
+                GREATEST(l_sent - l_sent_prev, 0);
+
+            l_received_delta :=
+                GREATEST(l_received - l_received_prev, 0);
+
+        END IF;
+
+
+        ----------------------------------------------------------------
+        -- SAVE CURRENT SNAPSHOT
+        ----------------------------------------------------------------
+
+        l_sent_prev     := l_sent;
+        l_received_prev := l_received;
+
+
+        ----------------------------------------------------------------
+        -- OUTPUT
         ----------------------------------------------------------------
 
         DBMS_OUTPUT.PUT_LINE(
             RPAD(i,8) ||
             RPAD(ROUND(l_elapsed,1),12) ||
-            RPAD(l_to_client,15) ||
-            RPAD(l_from_client,17) ||
-            RPAD(l_more_to_client,12) ||
-            l_more_from_client
+            RPAD(
+                ROUND(l_sent_delta / 1024 / 1024,2),
+                15
+            ) ||
+            RPAD(
+                ROUND(l_received_delta / 1024 / 1024,2),
+                15
+            ) ||
+            RPAD(
+                ROUND(
+                    (l_sent_delta + l_received_delta)
+                    / 1024 / 1024,
+                    2
+                ),
+                15
+            ) ||
+            ROUND(
+                (
+                    (l_sent_delta + l_received_delta)
+                    / 1024 / 1024
+                )
+                / l_interval_seconds
+                * 8,
+                2
+            )
         );
 
     END LOOP;
@@ -145,9 +187,11 @@ BEGIN
 
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE(
-        'Completed ' || l_samples ||
-        ' snapshots over approximately ' ||
-        ROUND(l_elapsed,1) || ' seconds.'
+        'TOTAL_MBPS = SQL*Net traffic generated during each interval'
+    );
+
+    DBMS_OUTPUT.PUT_LINE(
+        'Only sessions that were INACTIVE at each snapshot are included.'
     );
 
 END;
